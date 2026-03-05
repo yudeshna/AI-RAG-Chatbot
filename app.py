@@ -14,7 +14,7 @@ import requests
 # Settings
 # -----------------------------
 
-DB_DIR = "./chroma_db"
+DB_DIR = "/tmp/chroma_db"  # ✅ Streamlit Cloud safe path
 COLLECTION_NAME = "rag_docs"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -28,13 +28,28 @@ def load_embedder():
     return SentenceTransformer(MODEL_NAME)
 
 
-@st.cache_resource
-def load_collection():
-    client = chromadb.PersistentClient(
-        path=DB_DIR,
-        settings=Settings(anonymized_telemetry=False)
-    )
-    return client.get_or_create_collection(name=COLLECTION_NAME)
+def get_collection():
+    """Always returns a valid collection — safe for Streamlit Cloud."""
+    try:
+        client = chromadb.PersistentClient(
+            path=DB_DIR,
+            settings=Settings(anonymized_telemetry=False)
+        )
+        collection = client.get_or_create_collection(name=COLLECTION_NAME)
+        # Test if collection is alive
+        collection.count()
+        return collection
+    except Exception:
+        # If anything fails, recreate everything fresh
+        client = chromadb.PersistentClient(
+            path=DB_DIR,
+            settings=Settings(anonymized_telemetry=False)
+        )
+        try:
+            client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        return client.get_or_create_collection(name=COLLECTION_NAME)
 
 # -----------------------------
 # Read PDF
@@ -206,7 +221,7 @@ def main():
     st.caption("Powered by Streamlit + ChromaDB + OpenRouter")
 
     embedder = load_embedder()
-    collection = load_collection()
+    collection = get_collection()  # ✅ always safe
 
     # Sidebar
     st.sidebar.subheader("⚙️ LLM Settings")
@@ -224,6 +239,7 @@ def main():
             if not text.strip():
                 st.sidebar.error("Could not extract text from PDF. It may be scanned/image-based.")
             else:
+                collection = get_collection()  # ✅ refresh before writing
                 with st.spinner("Embedding and storing chunks..."):
                     count = store_docs(collection, embedder, text, uploaded_file.name)
                 st.sidebar.success(f"✅ Indexed {count} chunks")
@@ -233,7 +249,13 @@ def main():
 
     st.sidebar.divider()
 
-    total_chunks = collection.count()
+    # ✅ Safe count check
+    try:
+        total_chunks = collection.count()
+    except Exception:
+        collection = get_collection()
+        total_chunks = 0
+
     if total_chunks > 0:
         st.sidebar.success(f"📦 DB has {total_chunks} chunks ready")
     else:
@@ -246,7 +268,10 @@ def main():
             path=DB_DIR,
             settings=Settings(anonymized_telemetry=False)
         )
-        client.delete_collection(COLLECTION_NAME)
+        try:
+            client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
         client.get_or_create_collection(COLLECTION_NAME)
         st.cache_resource.clear()
         st.sidebar.success("✅ Vector database reset.")
@@ -260,7 +285,7 @@ def main():
         st.rerun()
 
     # Chat Interface
-    if collection.count() == 0:
+    if total_chunks == 0:
         st.info("👆 Upload a PDF and click **Index Uploaded File** to get started.")
 
     for msg in st.session_state.messages:
@@ -274,7 +299,7 @@ def main():
             st.warning("⚠️ Add your OpenRouter API key in the sidebar.")
             st.stop()
 
-        if collection.count() == 0:
+        if total_chunks == 0:
             st.warning("⚠️ No documents indexed yet. Please upload and index a PDF first.")
             st.stop()
 
@@ -283,6 +308,7 @@ def main():
             st.write(question)
 
         with st.spinner("🔍 Retrieving context..."):
+            collection = get_collection()  # ✅ refresh before reading
             docs = retrieve(collection, embedder, question, k=top_k)
 
         context = "\n\n".join(docs)
