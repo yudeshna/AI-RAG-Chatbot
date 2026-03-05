@@ -1,6 +1,7 @@
 venv/
+chroma_db/
 __pycache__/
 *.pyc
-chroma_db/
-.cache/
 .env
+*.egg-info/
+.streamlit/
