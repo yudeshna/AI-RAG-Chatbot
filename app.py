@@ -5,7 +5,6 @@ import unicodedata
 import os
 import streamlit as st
 import chromadb
-from chromadb.config import Settings
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import requests
@@ -28,28 +27,16 @@ def load_embedder():
     return SentenceTransformer(MODEL_NAME)
 
 
+@st.cache_resource
+def get_chroma_client():
+    """Create one ChromaDB client and reuse it."""
+    return chromadb.PersistentClient(path=DB_DIR)
+
+
 def get_collection():
-    """Always returns a valid collection — safe for Streamlit Cloud."""
-    try:
-        client = chromadb.PersistentClient(
-            path=DB_DIR,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        collection = client.get_or_create_collection(name=COLLECTION_NAME)
-        # Test if collection is alive
-        collection.count()
-        return collection
-    except Exception:
-        # If anything fails, recreate everything fresh
-        client = chromadb.PersistentClient(
-            path=DB_DIR,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        try:
-            client.delete_collection(COLLECTION_NAME)
-        except Exception:
-            pass
-        return client.get_or_create_collection(name=COLLECTION_NAME)
+    """Get or create the RAG document collection."""
+    client = get_chroma_client()
+    return client.get_or_create_collection(name=COLLECTION_NAME)
 
 # -----------------------------
 # Read PDF
@@ -263,19 +250,18 @@ def main():
 
     st.sidebar.divider()
 
-    if st.sidebar.button("🗑️ Reset Vector DB"):
-        client = chromadb.PersistentClient(
-            path=DB_DIR,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        try:
-            client.delete_collection(COLLECTION_NAME)
-        except Exception:
-            pass
-        client.get_or_create_collection(COLLECTION_NAME)
-        st.cache_resource.clear()
-        st.sidebar.success("✅ Vector database reset.")
-        st.rerun()
+   if st.sidebar.button("🗑️ Reset Vector DB"):
+    client = get_chroma_client()
+
+    try:
+        client.delete_collection(COLLECTION_NAME)
+    except Exception:
+        pass
+
+    client.get_or_create_collection(name=COLLECTION_NAME)
+
+    st.sidebar.success("✅ Vector database reset.")
+    st.rerun()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
