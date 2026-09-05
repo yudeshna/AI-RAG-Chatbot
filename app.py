@@ -19,10 +19,13 @@ import requests
 
 DB_DIR = "/tmp/chroma_db"
 COLLECTION_NAME = "rag_docs"
-
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Use the free router by default.
+# You can still change it from the sidebar.
+DEFAULT_LLM_MODEL = "openrouter/free"
 
 
 # ============================================================
@@ -51,10 +54,6 @@ def load_embedder():
 
 @st.cache_resource
 def get_chroma_client():
-    """
-    Create exactly one ChromaDB client and reuse it.
-    This prevents the 'different settings' error.
-    """
     os.makedirs(DB_DIR, exist_ok=True)
 
     return chromadb.PersistentClient(
@@ -82,17 +81,13 @@ def get_collection():
 # ============================================================
 
 def read_pdf(file):
-
     reader = PdfReader(file)
-
     pages = []
 
     for page_number, page in enumerate(reader.pages, start=1):
-
         content = page.extract_text()
 
         if content:
-
             pages.append({
                 "page": page_number,
                 "text": content
@@ -106,15 +101,11 @@ def read_pdf(file):
 # ============================================================
 
 def split_text(text, size=700, overlap=120):
-
     chunks = []
-
     start = 0
 
     while start < len(text):
-
         end = start + size
-
         chunk = text[start:end]
 
         if chunk.strip():
@@ -130,7 +121,6 @@ def split_text(text, size=700, overlap=120):
 # ============================================================
 
 def clean_text(text):
-
     if not isinstance(text, str):
         return ""
 
@@ -152,23 +142,19 @@ def clean_text(text):
 # ============================================================
 
 def store_docs(collection, embedder, pages, filename):
-
     all_chunks = []
     all_metadata = []
 
     for page in pages:
-
         page_number = page["page"]
         page_text = page["text"]
 
         chunks = split_text(page_text)
 
         for chunk in chunks:
-
             cleaned = clean_text(chunk)
 
             if cleaned:
-
                 all_chunks.append(cleaned)
 
                 all_metadata.append({
@@ -186,9 +172,7 @@ def store_docs(collection, embedder, pages, filename):
     embeddings = []
 
     for i, chunk in enumerate(all_chunks):
-
         try:
-
             embedding = embedder.encode(
                 [chunk]
             ).tolist()[0]
@@ -196,11 +180,9 @@ def store_docs(collection, embedder, pages, filename):
             embeddings.append(embedding)
 
         except Exception as e:
-
             st.error(
                 f"❌ Embedding failed for chunk {i}: {e}"
             )
-
             return 0
 
     ids = [
@@ -223,7 +205,6 @@ def store_docs(collection, embedder, pages, filename):
 # ============================================================
 
 def retrieve(collection, embedder, query, k=4):
-
     if collection.count() == 0:
         return [], []
 
@@ -241,7 +222,6 @@ def retrieve(collection, embedder, query, k=4):
     )
 
     if is_summary:
-
         search_query = (
             "main topics key points overview "
             "introduction important concepts"
@@ -253,7 +233,6 @@ def retrieve(collection, embedder, query, k=4):
         )
 
     else:
-
         search_query = query
 
         n_results = min(
@@ -275,8 +254,15 @@ def retrieve(collection, embedder, query, k=4):
         ]
     )
 
-    documents = results.get("documents", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
+    documents = results.get(
+        "documents",
+        [[]]
+    )[0]
+
+    metadatas = results.get(
+        "metadatas",
+        [[]]
+    )[0]
 
     clean_documents = []
     sources = []
@@ -285,7 +271,6 @@ def retrieve(collection, embedder, query, k=4):
         documents,
         metadatas
     ):
-
         if doc and str(doc).strip():
 
             clean_documents.append(
@@ -311,14 +296,12 @@ def retrieve(collection, embedder, query, k=4):
 # ============================================================
 
 def format_context(documents, sources):
-
     parts = []
 
     for i, (doc, source) in enumerate(
         zip(documents, sources),
         start=1
     ):
-
         parts.append(
             f"""
 SOURCE {i}
@@ -337,7 +320,6 @@ Page: {source['page']}
 # ============================================================
 
 def show_sources(sources):
-
     if not sources:
         return
 
@@ -345,11 +327,9 @@ def show_sources(sources):
         "📚 Retrieved Sources",
         expanded=False
     ):
-
         seen = set()
 
         for source in sources:
-
             key = (
                 source["source"],
                 source["page"]
@@ -373,9 +353,10 @@ def show_sources(sources):
 def call_llm(
     api_key,
     model,
-    prompt
+    prompt,
+    temperature=0.2,
+    max_tokens=1800
 ):
-
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -384,18 +365,18 @@ def call_llm(
     }
 
     data = {
-        "model": model,
+        "model": model.strip() or DEFAULT_LLM_MODEL,
         "messages": [
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.2
+        "temperature": temperature,
+        "max_tokens": max_tokens
     }
 
     try:
-
         response = requests.post(
             OPENROUTER_URL,
             headers=headers,
@@ -403,37 +384,87 @@ def call_llm(
             timeout=90
         )
 
-        result = response.json()
+        try:
+            result = response.json()
+        except Exception:
+            return None, (
+                f"OpenRouter returned an invalid response "
+                f"(HTTP {response.status_code})."
+            )
 
-        if "choices" not in result:
-
+        if response.status_code != 200:
             error = result.get(
                 "error",
                 result
             )
 
-            return None, f"API Error: {error}"
+            if isinstance(error, dict):
+                message = error.get(
+                    "message",
+                    str(error)
+                )
+                code = error.get(
+                    "code",
+                    response.status_code
+                )
+            else:
+                message = str(error)
+                code = response.status_code
 
-        answer = result[
-            "choices"
-        ][0][
-            "message"
-        ][
-            "content"
-        ]
+            return None, (
+                f"OpenRouter API Error ({code}): {message}"
+            )
+
+        choices = result.get("choices")
+
+        if not choices:
+            return None, (
+                "The AI model returned no choices."
+            )
+
+        message = choices[0].get(
+            "message",
+            {}
+        )
+
+        answer = message.get(
+            "content",
+            ""
+        )
+
+        # Some providers may return content in a
+        # slightly different form.
+        if isinstance(answer, list):
+            answer = "\n".join(
+                str(item.get("text", item))
+                if isinstance(item, dict)
+                else str(item)
+                for item in answer
+            )
+
+        answer = str(answer).strip()
+
+        if not answer:
+            return None, (
+                "The AI model returned an empty answer."
+            )
 
         return answer, None
 
     except requests.exceptions.Timeout:
-
         return None, (
-            "Request timed out. "
-            "Please try again."
+            "Request timed out. Please try again."
+        )
+
+    except requests.exceptions.RequestException as e:
+        return None, (
+            f"Network error: {str(e)}"
         )
 
     except Exception as e:
-
-        return None, str(e)
+        return None, (
+            f"Unexpected error: {str(e)}"
+        )
 
 
 # ============================================================
@@ -446,6 +477,11 @@ def answer_question(
     question,
     context
 ):
+    if not context.strip():
+        return (
+            "I could not find that in the uploaded document.",
+            None
+        )
 
     prompt = f"""
 You are an AI study assistant.
@@ -454,7 +490,6 @@ Answer the user's question using ONLY the
 provided document context.
 
 Rules:
-
 1. Do not invent information.
 2. Use the terminology from the document.
 3. Give a clear and student-friendly explanation.
@@ -467,11 +502,9 @@ Rules:
 "I could not find that in the uploaded document."
 
 DOCUMENT CONTEXT:
-
 {context}
 
 USER QUESTION:
-
 {question}
 
 ANSWER:
@@ -480,7 +513,9 @@ ANSWER:
     return call_llm(
         api_key,
         model,
-        prompt
+        prompt,
+        temperature=0.2,
+        max_tokens=1800
     )
 
 
@@ -495,39 +530,54 @@ def generate_quiz(
     difficulty,
     number
 ):
+    if not context.strip():
+        return None, (
+            "No document context was available. "
+            "Please make sure the PDF is indexed."
+        )
 
     prompt = f"""
 You are an expert university exam question generator.
 
-Create exactly {number} questions based ONLY on
+Create EXACTLY {number} exam-style questions using ONLY
 the document context below.
 
 Difficulty: {difficulty}
 
-Requirements:
+Difficulty rules:
+- Easy: definitions, meanings, basic concepts and simple facts.
+- Medium: explanations, comparisons, processes, applications and relationships.
+- Hard: analysis, derivations, problem-solving and deeper understanding.
 
-- Questions must be directly related to the document.
-- Do not invent topics that are not present.
-- For Easy questions, test definitions and basic concepts.
-- For Medium questions, test explanations, comparisons,
-  processes and applications.
-- For Hard questions, test analysis, derivations,
-  problem-solving or deeper understanding.
-- Questions should be suitable for university examinations.
+STRICT OUTPUT FORMAT:
+1. First question text
+2. Second question text
+3. Third question text
+Continue until exactly {number} questions are written.
+
+IMPORTANT:
+- Start every question with its number followed by a period.
+- Example: 1. What is Reinforcement Learning?
+- Put ONE question on each numbered line.
+- Do not use bullets.
+- Do not use markdown.
 - Do not provide answers.
-- Number the questions from 1 to {number}.
+- Do not add explanations before or after the questions.
+- Do not create questions from information outside the document.
+- Make every question suitable for a university examination.
 
 DOCUMENT CONTEXT:
-
 {context}
 
-Generate the questions now.
+Generate exactly {number} questions now.
 """
 
     answer, error = call_llm(
         api_key,
         model,
-        prompt
+        prompt,
+        temperature=0.3,
+        max_tokens=1400
     )
 
     if error:
@@ -540,48 +590,193 @@ Generate the questions now.
 # PARSE QUESTIONS
 # ============================================================
 
-def parse_questions(text):
+def clean_question_text(text):
+    text = text.strip()
 
+    # Remove common markdown wrappers.
+    text = re.sub(
+        r"^\*+\s*",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s*\*+$",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"^#+\s*",
+        "",
+        text
+    )
+
+    text = text.strip()
+
+    return text
+
+
+def parse_questions(text):
     if not text:
         return []
 
-    lines = text.splitlines()
+    text = text.strip()
+
+    # --------------------------------------------------------
+    # First try JSON in case a provider returns JSON anyway.
+    # --------------------------------------------------------
+
+    try:
+        parsed = json.loads(text)
+
+        if isinstance(parsed, list):
+            questions = []
+
+            for item in parsed:
+                if isinstance(item, str):
+                    q = clean_question_text(item)
+
+                elif isinstance(item, dict):
+                    q = (
+                        item.get("question")
+                        or item.get("text")
+                        or item.get("prompt")
+                        or ""
+                    )
+                    q = clean_question_text(str(q))
+
+                else:
+                    q = ""
+
+                if q:
+                    questions.append(q)
+
+            if questions:
+                return questions
+
+        if isinstance(parsed, dict):
+            possible = (
+                parsed.get("questions")
+                or parsed.get("quiz")
+                or []
+            )
+
+            if isinstance(possible, list):
+                questions = []
+
+                for item in possible:
+                    if isinstance(item, str):
+                        q = item
+
+                    elif isinstance(item, dict):
+                        q = (
+                            item.get("question")
+                            or item.get("text")
+                            or item.get("prompt")
+                            or ""
+                        )
+
+                    else:
+                        q = ""
+
+                    q = clean_question_text(str(q))
+
+                    if q:
+                        questions.append(q)
+
+                if questions:
+                    return questions
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Normal numbered output.
+    # Supports:
+    # 1. Question
+    # 1) Question
+    # Q1: Question
+    # Question 1: Question
+    # --------------------------------------------------------
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
 
     questions = []
-
     current = ""
 
-    for line in lines:
-
-        line = line.strip()
-
-        if not line:
-            continue
-
-        match = re.match(
-            r"^(?:Q(?:uestion)?\s*)?(\d+)[\.\):\-]\s*(.*)",
-            line,
+    patterns = [
+        re.compile(
+            r"^(?:Q(?:uestion)?\s*)?(\d+)\s*[\.\):\-]\s*(.*)$",
             re.IGNORECASE
-        )
+        ),
+        re.compile(
+            r"^Question\s+(\d+)\s*[\.\):\-]\s*(.*)$",
+            re.IGNORECASE
+        ),
+    ]
 
-        if match:
+    for line in lines:
+        matched = None
 
+        for pattern in patterns:
+            match = pattern.match(line)
+
+            if match:
+                matched = match
+                break
+
+        if matched:
             if current:
                 questions.append(
-                    current.strip()
+                    clean_question_text(current)
                 )
 
-            current = match.group(2).strip()
+            current = matched.group(2).strip()
 
         else:
+            # Handle markdown bullets if the model ignored
+            # the strict format.
+            bullet_match = re.match(
+                r"^[-*•]\s+(.*)$",
+                line
+            )
 
-            if current:
+            if bullet_match and not current:
+                current = bullet_match.group(1).strip()
+
+            elif current:
                 current += " " + line
 
     if current:
         questions.append(
-            current.strip()
+            clean_question_text(current)
         )
+
+    questions = [
+        q for q in questions
+        if q and len(q) > 5
+    ]
+
+    # --------------------------------------------------------
+    # Last-resort fallback:
+    # If the model returned separate question-like lines
+    # without numbering, keep those lines.
+    # --------------------------------------------------------
+
+    if not questions:
+        for line in lines:
+            candidate = clean_question_text(line)
+
+            if (
+                candidate.endswith("?")
+                and len(candidate) > 10
+            ):
+                questions.append(candidate)
 
     return questions
 
@@ -597,7 +792,6 @@ def evaluate_answer(
     student_answer,
     context
 ):
-
     prompt = f"""
 You are a strict but helpful university examiner.
 
@@ -646,7 +840,9 @@ IMPORTANT:
     return call_llm(
         api_key,
         model,
-        prompt
+        prompt,
+        temperature=0.2,
+        max_tokens=1800
     )
 
 
@@ -667,9 +863,21 @@ def main():
     # LOAD MODELS
     # --------------------------------------------------------
 
-    embedder = load_embedder()
+    try:
+        embedder = load_embedder()
+    except Exception as e:
+        st.error(
+            f"❌ Could not load embedding model: {e}"
+        )
+        st.stop()
 
-    collection = get_collection()
+    try:
+        collection = get_collection()
+    except Exception as e:
+        st.error(
+            f"❌ Could not initialize ChromaDB: {e}"
+        )
+        st.stop()
 
     # --------------------------------------------------------
     # SIDEBAR
@@ -679,19 +887,28 @@ def main():
 
     api_key = st.sidebar.text_input(
         "OpenRouter API Key",
-        type="password"
+        type="password",
+        help="Enter your OpenRouter API key."
     )
 
     model_name = st.sidebar.text_input(
         "Model",
-        value="stepfun/step-3.5-flash"
-    )
+        value=DEFAULT_LLM_MODEL,
+        help=(
+            "openrouter/free automatically selects "
+            "an available free model."
+        )
+    ).strip()
+
+    if not model_name:
+        model_name = DEFAULT_LLM_MODEL
 
     top_k = st.sidebar.slider(
         "Retrieved chunks",
         min_value=2,
         max_value=8,
-        value=4
+        value=4,
+        help="Number of document sections retrieved for each question."
     )
 
     st.sidebar.divider()
@@ -711,17 +928,14 @@ def main():
         "📥 Index Uploaded File",
         use_container_width=True
     ):
-
         if uploaded_file:
 
             try:
-
                 pages = read_pdf(
                     uploaded_file
                 )
 
                 if not pages:
-
                     st.sidebar.error(
                         "Could not extract text from PDF. "
                         "It may be scanned/image-based."
@@ -732,7 +946,6 @@ def main():
                     with st.spinner(
                         "Embedding and storing document..."
                     ):
-
                         count = store_docs(
                             collection,
                             embedder,
@@ -741,7 +954,6 @@ def main():
                         )
 
                     if count > 0:
-
                         st.sidebar.success(
                             f"✅ Indexed {count} chunks"
                         )
@@ -752,19 +964,16 @@ def main():
                         )
 
                     else:
-
                         st.sidebar.error(
                             "No usable text was found."
                         )
 
             except Exception as e:
-
                 st.sidebar.error(
                     f"❌ Error: {e}"
                 )
 
         else:
-
             st.sidebar.warning(
                 "Upload a PDF first."
             )
@@ -776,21 +985,15 @@ def main():
     st.sidebar.divider()
 
     try:
-
         total_chunks = collection.count()
-
     except Exception:
-
         total_chunks = 0
 
     if total_chunks > 0:
-
         st.sidebar.success(
             f"📦 Database: {total_chunks} chunks"
         )
-
     else:
-
         st.sidebar.warning(
             "⚠️ Database is empty"
         )
@@ -805,9 +1008,7 @@ def main():
         "🗑️ Reset Vector DB",
         use_container_width=True
     ):
-
         try:
-
             client = get_chroma_client()
 
             try:
@@ -828,7 +1029,6 @@ def main():
             st.rerun()
 
         except Exception as e:
-
             st.sidebar.error(
                 f"Reset failed: {e}"
             )
@@ -841,9 +1041,7 @@ def main():
         "🧹 Clear Chat",
         use_container_width=True
     ):
-
         st.session_state.messages = []
-
         st.rerun()
 
     # --------------------------------------------------------
@@ -851,24 +1049,22 @@ def main():
     # --------------------------------------------------------
 
     if "messages" not in st.session_state:
-
         st.session_state.messages = []
 
     if "quiz_questions" not in st.session_state:
-
         st.session_state.quiz_questions = []
 
     if "quiz_answers" not in st.session_state:
-
         st.session_state.quiz_answers = {}
 
     if "quiz_results" not in st.session_state:
-
         st.session_state.quiz_results = {}
 
     if "quiz_started" not in st.session_state:
-
         st.session_state.quiz_started = False
+
+    if "quiz_difficulty" not in st.session_state:
+        st.session_state.quiz_difficulty = "Easy"
 
     # ========================================================
     # TABS
@@ -886,21 +1082,17 @@ def main():
     with chat_tab:
 
         if total_chunks == 0:
-
             st.info(
                 "👆 Upload a PDF from the sidebar "
                 "and click **Index Uploaded File** "
                 "to get started."
             )
 
-        # Display previous messages
-
         for msg in st.session_state.messages:
 
             with st.chat_message(
                 msg["role"]
             ):
-
                 st.write(
                     msg["content"]
                 )
@@ -909,7 +1101,6 @@ def main():
                     msg["role"] == "assistant"
                     and msg.get("sources")
                 ):
-
                     show_sources(
                         msg["sources"]
                     )
@@ -921,24 +1112,18 @@ def main():
         if question:
 
             if not api_key:
-
                 st.warning(
                     "⚠️ Add your OpenRouter API key "
                     "in the sidebar."
                 )
-
                 st.stop()
 
             if total_chunks == 0:
-
                 st.warning(
                     "⚠️ Please upload and index "
                     "a PDF first."
                 )
-
                 st.stop()
-
-            # USER MESSAGE
 
             st.session_state.messages.append({
                 "role": "user",
@@ -946,15 +1131,11 @@ def main():
             })
 
             with st.chat_message("user"):
-
                 st.write(question)
-
-            # RETRIEVE
 
             with st.spinner(
                 "🔍 Searching your document..."
             ):
-
                 collection = get_collection()
 
                 documents, sources = retrieve(
@@ -969,8 +1150,6 @@ def main():
                 sources
             )
 
-            # ANSWER
-
             with st.chat_message(
                 "assistant"
             ):
@@ -978,7 +1157,6 @@ def main():
                 with st.spinner(
                     "💬 Generating answer..."
                 ):
-
                     answer, error = answer_question(
                         api_key,
                         model_name,
@@ -987,7 +1165,6 @@ def main():
                     )
 
                 if error:
-
                     st.error(
                         f"❌ {error}"
                     )
@@ -997,7 +1174,6 @@ def main():
                     )
 
                 else:
-
                     st.write(answer)
 
                     show_sources(
@@ -1039,27 +1215,27 @@ def main():
             col1, col2 = st.columns(2)
 
             with col1:
-
                 difficulty = st.selectbox(
                     "Difficulty",
                     [
                         "Easy",
                         "Medium",
                         "Hard"
-                    ]
+                    ],
+                    key="difficulty_select"
                 )
 
             with col2:
-
                 number = st.selectbox(
                     "Number of questions",
-                    [3, 5, 10]
+                    [3, 5, 10],
+                    key="number_select"
                 )
 
             st.divider()
 
             # ------------------------------------------------
-            # GENERATE QUIZ BUTTON
+            # GENERATE QUIZ
             # ------------------------------------------------
 
             if st.button(
@@ -1069,7 +1245,6 @@ def main():
             ):
 
                 if not api_key:
-
                     st.warning(
                         "⚠️ Add your OpenRouter API key "
                         "in the sidebar."
@@ -1081,14 +1256,15 @@ def main():
                         "🧠 Creating questions from your PDF..."
                     ):
 
-                        # Retrieve broad document context
-
                         documents, sources = retrieve(
                             collection,
                             embedder,
-                            "main topics concepts definitions "
-                            "important principles algorithms "
-                            "applications examples",
+                            (
+                                "main topics concepts definitions "
+                                "important principles algorithms "
+                                "applications examples formulas "
+                                "processes"
+                            ),
                             k=8
                         )
 
@@ -1117,249 +1293,270 @@ def main():
                             quiz_text
                         )
 
-                        if questions:
+                        if len(questions) >= number:
 
                             st.session_state.quiz_questions = (
                                 questions[:number]
                             )
 
                             st.session_state.quiz_answers = {}
-
                             st.session_state.quiz_results = {}
-
                             st.session_state.quiz_started = True
+                            st.session_state.quiz_difficulty = difficulty
 
                             st.rerun()
+
+                        elif questions:
+
+                            st.warning(
+                                f"The model returned only "
+                                f"{len(questions)} usable questions "
+                                f"instead of {number}. "
+                                f"Please click Generate Quiz again."
+                            )
 
                         else:
 
                             st.error(
-                                "Could not generate questions. "
-                                "Please try again."
+                                "Could not parse the generated questions."
                             )
 
-            # ------------------------------------------------
-            # DISPLAY QUIZ
-            # ------------------------------------------------
+                            # Show the raw model output so the
+                            # problem is visible instead of hiding it.
+                            with st.expander(
+                                "🔎 Show generated output"
+                            ):
+                                st.code(
+                                    quiz_text or
+                                    "(empty response)"
+                                )
 
-            if st.session_state.quiz_started:
+    # --------------------------------------------------------
+    # DISPLAY QUIZ
+    # --------------------------------------------------------
 
-                questions = (
-                    st.session_state.quiz_questions
+    if st.session_state.quiz_started:
+
+        questions = (
+            st.session_state.quiz_questions
+        )
+
+        quiz_difficulty = (
+            st.session_state.quiz_difficulty
+        )
+
+        st.subheader(
+            f"📝 {quiz_difficulty} Quiz"
+        )
+
+        st.caption(
+            f"{len(questions)} questions"
+        )
+
+        for i, question in enumerate(
+            questions
+        ):
+
+            st.markdown(
+                f"### Question {i + 1}"
+            )
+
+            st.write(question)
+
+            answer_key = (
+                f"answer_{i}"
+            )
+
+            current_answer = (
+                st.session_state.quiz_answers.get(
+                    answer_key,
+                    ""
+                )
+            )
+
+            student_answer = st.text_area(
+                "Your answer:",
+                value=current_answer,
+                key=f"text_{i}",
+                height=150
+            )
+
+            st.session_state.quiz_answers[
+                answer_key
+            ] = student_answer
+
+            result_key = (
+                f"result_{i}"
+            )
+
+            if result_key in (
+                st.session_state.quiz_results
+            ):
+
+                result = (
+                    st.session_state.quiz_results[
+                        result_key
+                    ]
                 )
 
-                st.subheader(
-                    f"📝 {difficulty} Quiz"
+                st.markdown(
+                    "---"
                 )
 
-                st.caption(
-                    f"{len(questions)} questions"
+                st.markdown(
+                    "### 🤖 Evaluation"
                 )
 
-                for i, question in enumerate(
-                    questions
+                st.write(result)
+
+            else:
+
+                if st.button(
+                    f"🤖 Evaluate Answer {i + 1}",
+                    key=f"evaluate_{i}"
                 ):
 
-                    st.markdown(
-                        f"### Question {i + 1}"
+                    student_answer = (
+                        st.session_state.quiz_answers[
+                            answer_key
+                        ]
                     )
 
-                    st.write(question)
+                    if not student_answer.strip():
 
-                    answer_key = (
-                        f"answer_{i}"
-                    )
-
-                    st.session_state.quiz_answers[
-                        answer_key
-                    ] = st.text_area(
-                        "Your answer:",
-                        value=st.session_state.quiz_answers.get(
-                            answer_key,
-                            ""
-                        ),
-                        key=f"text_{i}",
-                        height=150
-                    )
-
-                    # Existing result
-
-                    result_key = (
-                        f"result_{i}"
-                    )
-
-                    if result_key in (
-                        st.session_state.quiz_results
-                    ):
-
-                        result = (
-                            st.session_state.quiz_results[
-                                result_key
-                            ]
+                        st.warning(
+                            "Please write an answer first."
                         )
 
-                        st.markdown(
-                            "---"
-                        )
+                    elif not api_key:
 
-                        st.markdown(
-                            "### 🤖 Evaluation"
+                        st.warning(
+                            "Add your OpenRouter API key."
                         )
-
-                        st.write(result)
 
                     else:
 
-                        if st.button(
-                            f"🤖 Evaluate Answer {i + 1}",
-                            key=f"evaluate_{i}"
+                        with st.spinner(
+                            "Checking your answer..."
                         ):
 
-                            student_answer = (
-                                st.session_state.quiz_answers[
-                                    answer_key
-                                ]
+                            documents, sources = retrieve(
+                                collection,
+                                embedder,
+                                question,
+                                k=top_k
                             )
 
-                            if not student_answer.strip():
-
-                                st.warning(
-                                    "Please write an answer first."
-                                )
-
-                            elif not api_key:
-
-                                st.warning(
-                                    "Add your OpenRouter API key."
-                                )
-
-                            else:
-
-                                with st.spinner(
-                                    "Checking your answer..."
-                                ):
-
-                                    documents, sources = retrieve(
-                                        collection,
-                                        embedder,
-                                        question,
-                                        k=top_k
-                                    )
-
-                                    context = format_context(
-                                        documents,
-                                        sources
-                                    )
-
-                                    result, error = evaluate_answer(
-                                        api_key,
-                                        model_name,
-                                        question,
-                                        student_answer,
-                                        context
-                                    )
-
-                                if error:
-
-                                    st.error(
-                                        f"❌ {error}"
-                                    )
-
-                                else:
-
-                                    st.session_state.quiz_results[
-                                        result_key
-                                    ] = result
-
-                                    st.rerun()
-
-                    st.divider()
-
-                # ------------------------------------------------
-                # FINAL SCORE
-                # ------------------------------------------------
-
-                evaluated = (
-                    len(
-                        st.session_state.quiz_results
-                    )
-                )
-
-                if evaluated == len(
-                    questions
-                ):
-
-                    st.success(
-                        "🎉 You have completed the quiz!"
-                    )
-
-                    scores = []
-
-                    for result in (
-                        st.session_state.quiz_results.values()
-                    ):
-
-                        match = re.search(
-                            r"SCORE:\s*(\d+)\s*/\s*10",
-                            result,
-                            re.IGNORECASE
-                        )
-
-                        if match:
-
-                            scores.append(
-                                int(match.group(1))
+                            context = format_context(
+                                documents,
+                                sources
                             )
 
-                    if scores:
-
-                        total_score = sum(
-                            scores
-                        )
-
-                        max_score = (
-                            len(scores) * 10
-                        )
-
-                        percentage = (
-                            total_score /
-                            max_score
-                        ) * 100
-
-                        st.metric(
-                            "Your Score",
-                            f"{total_score}/{max_score}"
-                        )
-
-                        st.progress(
-                            percentage / 100
-                        )
-
-                        st.write(
-                            f"📊 **Percentage: "
-                            f"{percentage:.0f}%**"
-                        )
-
-                        if percentage >= 80:
-
-                            st.success(
-                                "🔥 Excellent! "
-                                "You are well prepared."
+                            result, error = evaluate_answer(
+                                api_key,
+                                model_name,
+                                question,
+                                student_answer,
+                                context
                             )
 
-                        elif percentage >= 60:
+                        if error:
 
-                            st.info(
-                                "👍 Good job! "
-                                "Review the topics you missed."
+                            st.error(
+                                f"❌ {error}"
                             )
 
                         else:
 
-                            st.warning(
-                                "📚 Keep practicing. "
-                                "Review the PDF and try again."
-                            )
+                            st.session_state.quiz_results[
+                                result_key
+                            ] = result
+
+                            st.rerun()
+
+            st.divider()
+
+        # ------------------------------------------------
+        # FINAL SCORE
+        # ------------------------------------------------
+
+        evaluated = len(
+            st.session_state.quiz_results
+        )
+
+        if evaluated == len(questions):
+
+            st.success(
+                "🎉 You have completed the quiz!"
+            )
+
+            scores = []
+
+            for result in (
+                st.session_state.quiz_results.values()
+            ):
+
+                match = re.search(
+                    r"SCORE:\s*(\d+)\s*/\s*10",
+                    result,
+                    re.IGNORECASE
+                )
+
+                if match:
+                    score = min(
+                        int(match.group(1)),
+                        10
+                    )
+
+                    scores.append(score)
+
+            if scores:
+
+                total_score = sum(scores)
+
+                max_score = (
+                    len(scores) * 10
+                )
+
+                percentage = (
+                    total_score /
+                    max_score
+                ) * 100
+
+                st.metric(
+                    "Your Score",
+                    f"{total_score}/{max_score}"
+                )
+
+                st.progress(
+                    percentage / 100
+                )
+
+                st.write(
+                    f"📊 **Percentage: "
+                    f"{percentage:.0f}%**"
+                )
+
+                if percentage >= 80:
+
+                    st.success(
+                        "🔥 Excellent! "
+                        "You are well prepared."
+                    )
+
+                elif percentage >= 60:
+
+                    st.info(
+                        "👍 Good job! "
+                        "Review the topics you missed."
+                    )
+
+                else:
+
+                    st.warning(
+                        "📚 Keep practicing. "
+                        "Review the PDF and try again."
+                    )
 
 
 # ============================================================
