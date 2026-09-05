@@ -36,11 +36,17 @@ def load_embedder():
 @st.cache_resource
 def get_chroma_client():
     """
-    Create one ChromaDB persistent client and reuse it
-    across Streamlit reruns.
+    Create one ChromaDB client with consistent settings.
     """
-    return chromadb.PersistentClient(path=DB_DIR)
+    from chromadb.config import Settings
 
+    return chromadb.PersistentClient(
+        path=DB_DIR,
+        settings=Settings(
+            anonymized_telemetry=False,
+            is_persistent=True
+        )
+    )
 
 def get_collection():
     """
